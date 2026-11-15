@@ -31,6 +31,8 @@
 
 #include "ultralcd.h"
 #include "UltiLCD2.h"
+#include "UltiLCD2_hi_lib.h"
+#include "UltiLCD2_menu_material.h"
 #include "planner.h"
 #include "stepper.h"
 #include "temperature.h"
@@ -2333,6 +2335,41 @@ static void process_command()
       FlushSerialRequestResend();
     break;
 #ifdef ENABLE_ULTILCD2
+    case 12000: // M12000 [T<e>] - Jedi: report the loaded material
+    case 12002: // M12002 [T<e>] [S<nozzle>] [V<0|1>] - Jedi: apply the loaded material
+    {
+        bool apply = ((int)code_value() == 12002);
+        uint8_t e = active_extruder;
+        if (code_seen('T'))
+            e = code_value();
+        if (e >= EXTRUDERS)
+        {
+            // Do not use MSG_INVALID_EXTRUDER or an "Error:" line here: OctoPrint treats
+            // "Invalid extruder" as an invalid current tool and "Error:" as fatal.
+            SERIAL_ECHO_START;
+            SERIAL_ECHOLNPGM("M12000/M12002: unknown T");
+            break;
+        }
+        if (apply)
+        {
+            float nozzle_size = 0.4;
+            if (code_seen('S'))
+                nozzle_size = code_value();
+            bool volumetric = code_seen('V') && code_value() > 0;
+            jedi_apply_current_material(e, nozzle_size, volumetric);
+        }
+        else
+        {
+            jedi_report_current_material(e);
+        }
+    }
+    break;
+    case 12001: // M12001 - Jedi: report all material presets
+        jedi_report_material_presets();
+        break;
+    case 12003: // M12003 - Jedi: back to defaults for classic G-code
+        jedi_reset_classic_gcode();
+        break;
     case 10000://M10000 - Clear the whole LCD
         lcd_lib_clear();
         break;

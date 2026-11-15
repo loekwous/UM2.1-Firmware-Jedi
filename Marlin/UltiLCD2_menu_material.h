@@ -89,4 +89,10 @@ void lcd_material_store_current_material();
 uint8_t nozzleSizeToTemperatureIndex(float nozzle_size);
 float nozzleIndexToNozzleSize(uint8_t nozzle_index);
 
+// Jedi: material settings over USB (M12000-M12003)
+void jedi_report_current_material(uint8_t e);
+void jedi_report_material_presets();
+void jedi_apply_current_material(uint8_t e, float nozzle_size, bool volumetric);
+void jedi_reset_classic_gcode();
+
 #endif//ULTI_LCD2_MENU_MATERIAL_H

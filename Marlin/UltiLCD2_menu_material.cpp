@@ -1636,4 +1636,152 @@ float nozzleIndexToNozzleSize(uint8_t nozzle_index)
     return 0.0;
 }
 
+/*
+ * Jedi: material settings over USB.
+ *  M12000 [T<e>]                 Report the loaded material (as selected in the printer menu).
+ *  M12001                        Report all stored material presets (like MATERIAL.TXT).
+ *  M12002 [T<e>] [S<nozzle>] [V<0|1>]
+ *                                Apply the loaded material the way an UltiGCode print from SD does:
+ *                                nozzle target temperature (for nozzle size S, default 0.4) and bed,
+ *                                fan %, flow %, retraction for G10/G11. V1: E values are volumetric
+ *                                (mm3, UltiGCode); V0 (default): E in mm of filament.
+ *                                Does not wait; use M190 and M109 without S afterwards to wait.
+ *  M12003                        Reset to the defaults for classic G-code
+ *                                (fan 100%, flow 100%, E in mm of filament).
+ * Output is one line each: "MATERIAL:" / "PRESET:" / "APPLIED:" followed by key=value pairs.
+ */
+static void jedi_print_name(const char* name)
+{
+    SERIAL_PROTOCOLPGM(" name=");
+    for(uint8_t i=0; i<MATERIAL_NAME_SIZE && name[i] != '\0'; i++)
+    {
+        char c = name[i];
+        if (c == ' ') c = '_';
+        if (c < 32 || c > 126) c = '?';
+        MYSERIAL.write(c);
+    }
+}
+
+static void jedi_print_nozzle(uint8_t n, int16_t temperature, float retraction_length, float retraction_speed_mm_per_min)
+{
+    SERIAL_PROTOCOLPGM(" nozzle");
+    SERIAL_PROTOCOL_F(nozzleIndexToNozzleSize(n), 2);
+    SERIAL_PROTOCOLPGM("=");
+    SERIAL_PROTOCOL(temperature);
+    SERIAL_PROTOCOLPGM("/");
+    SERIAL_PROTOCOL_F(retraction_length, 2);
+    SERIAL_PROTOCOLPGM("/");
+    SERIAL_PROTOCOL_F(retraction_speed_mm_per_min / 60.0, 2);
+}
+
+void jedi_report_current_material(uint8_t e)
+{
+    SERIAL_PROTOCOLPGM("MATERIAL: T");
+    SERIAL_PROTOCOL(int(e));
+    jedi_print_name(material[e].name);
+#if TEMP_SENSOR_BED != 0
+    SERIAL_PROTOCOLPGM(" bed=");
+    SERIAL_PROTOCOL(material[e].bed_temperature);
+#endif
+    SERIAL_PROTOCOLPGM(" fan=");
+    SERIAL_PROTOCOL(int(material[e].fan_speed));
+    SERIAL_PROTOCOLPGM(" flow=");
+    SERIAL_PROTOCOL(material[e].flow);
+    SERIAL_PROTOCOLPGM(" diameter=");
+    SERIAL_PROTOCOL_F(material[e].diameter, 2);
+    SERIAL_PROTOCOLPGM(" change_temp=");
+    SERIAL_PROTOCOL(material[e].change_temperature);
+    for(uint8_t n=0; n<MATERIAL_NOZZLE_COUNT; n++)
+        jedi_print_nozzle(n, material[e].temperature[n], material[e].retraction_length[n], material[e].retraction_speed[n]);
+    SERIAL_PROTOCOLLNPGM("");
+}
+
+void jedi_report_material_presets()
+{
+    uint8_t count = eeprom_read_byte(EEPROM_MATERIAL_COUNT_OFFSET());
+    if (count > EEPROM_MATERIAL_SETTINGS_MAX_COUNT)
+        count = 0;
+    for(uint8_t nr=0; nr<count; nr++)
+    {
+        char name[MATERIAL_NAME_SIZE + 1];
+        eeprom_read_block(name, EEPROM_MATERIAL_NAME_OFFSET(nr), MATERIAL_NAME_SIZE);
+        name[MATERIAL_NAME_SIZE] = '\0';
+        SERIAL_PROTOCOLPGM("PRESET: ");
+        SERIAL_PROTOCOL(int(nr + 1));
+        SERIAL_PROTOCOLPGM("/");
+        SERIAL_PROTOCOL(int(count));
+        jedi_print_name(name);
+#if TEMP_SENSOR_BED != 0
+        SERIAL_PROTOCOLPGM(" bed=");
+        SERIAL_PROTOCOL(int(eeprom_read_word(EEPROM_MATERIAL_BED_TEMPERATURE_OFFSET(nr))));
+#endif
+        SERIAL_PROTOCOLPGM(" fan=");
+        SERIAL_PROTOCOL(int(eeprom_read_byte(EEPROM_MATERIAL_FAN_SPEED_OFFSET(nr))));
+        SERIAL_PROTOCOLPGM(" flow=");
+        SERIAL_PROTOCOL(int(eeprom_read_word(EEPROM_MATERIAL_FLOW_OFFSET(nr))));
+        SERIAL_PROTOCOLPGM(" diameter=");
+        SERIAL_PROTOCOL_F(eeprom_read_float(EEPROM_MATERIAL_DIAMETER_OFFSET(nr)), 2);
+        SERIAL_PROTOCOLPGM(" change_temp=");
+        SERIAL_PROTOCOL(int(eeprom_read_word(EEPROM_MATERIAL_CHANGE_TEMPERATURE(nr))));
+        for(uint8_t n=0; n<MATERIAL_NOZZLE_COUNT; n++)
+        {
+            jedi_print_nozzle(n,
+                eeprom_read_word(EEPROM_MATERIAL_EXTRA_TEMPERATURE_OFFSET(nr, n)),
+                float(eeprom_read_word(EEPROM_MATERIAL_EXTRA_RETRACTION_LENGTH_OFFSET(nr, n))) / EEPROM_RETRACTION_LENGTH_SCALE,
+                float(eeprom_read_byte(EEPROM_MATERIAL_EXTRA_RETRACTION_SPEED_OFFSET(nr, n))) / EEPROM_RETRACTION_SPEED_SCALE * 60);
+        }
+        SERIAL_PROTOCOLLNPGM("");
+    }
+}
+
+void jedi_apply_current_material(uint8_t e, float nozzle_size, bool volumetric)
+{
+    uint8_t n = nozzleSizeToTemperatureIndex(nozzle_size);
+    setTargetHotend(material[e].temperature[n], e);
+#if TEMP_SENSOR_BED != 0
+    setTargetBed(material[e].bed_temperature);
+#endif
+    fanSpeedPercent = material[e].fan_speed;
+    extrudemultiply[e] = material[e].flow;
+    retract_length = material[e].retraction_length[n];
+    retract_feedrate = material[e].retraction_speed[n];
+    if (volumetric)
+        volume_to_filament_length[e] = 1.0 / (M_PI * (material[e].diameter / 2.0) * (material[e].diameter / 2.0));
+    else
+        volume_to_filament_length[e] = 1.0;
+
+    SERIAL_PROTOCOLPGM("APPLIED: T");
+    SERIAL_PROTOCOL(int(e));
+    jedi_print_name(material[e].name);
+    SERIAL_PROTOCOLPGM(" nozzle=");
+    SERIAL_PROTOCOL_F(nozzleIndexToNozzleSize(n), 2);
+    SERIAL_PROTOCOLPGM(" temp=");
+    SERIAL_PROTOCOL(material[e].temperature[n]);
+#if TEMP_SENSOR_BED != 0
+    SERIAL_PROTOCOLPGM(" bed=");
+    SERIAL_PROTOCOL(material[e].bed_temperature);
+#endif
+    SERIAL_PROTOCOLPGM(" fan=");
+    SERIAL_PROTOCOL(int(fanSpeedPercent));
+    SERIAL_PROTOCOLPGM(" flow=");
+    SERIAL_PROTOCOL(extrudemultiply[e]);
+    SERIAL_PROTOCOLPGM(" retract=");
+    SERIAL_PROTOCOL_F(retract_length, 2);
+    SERIAL_PROTOCOLPGM("/");
+    SERIAL_PROTOCOL_F(retract_feedrate / 60.0, 2);
+    SERIAL_PROTOCOLPGM(" volumetric=");
+    SERIAL_PROTOCOLLN(int(volumetric));
+}
+
+void jedi_reset_classic_gcode()
+{
+    fanSpeedPercent = 100;
+    for(uint8_t e=0; e<EXTRUDERS; e++)
+    {
+        extrudemultiply[e] = 100;
+        volume_to_filament_length[e] = 1.0;
+    }
+    SERIAL_PROTOCOLLNPGM("APPLIED: classic fan=100 flow=100 volumetric=0");
+}
+
 #endif//ENABLE_ULTILCD2
