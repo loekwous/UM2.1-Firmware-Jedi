@@ -2386,11 +2386,12 @@ static void process_command()
                            has_diameter, diameter, has_length, length, has_speed, speed, has_change, change);
     }
     break;
-    case 12005: // M12005 P<n> <name> - Jedi: rename a material preset
+    case 12005: // M12005 P<n> <name> | M12005 P<n> X<hex> - Jedi: rename a material preset
     {
         long p = 0;
         const char* name = NULL;
         uint8_t length = 0;
+        char decoded[MATERIAL_NAME_SIZE + 1];
         if (code_seen('P'))
         {
             p = code_value_long();
@@ -2401,6 +2402,28 @@ static void process_command()
             name = c;
             while (*c != '\0' && *c != '*' && length < 255) { c++; length++; }
             while (length > 0 && name[length - 1] == ' ') length--;
+
+            // Hex form "X<hex>": needed for names with an uppercase N, '*' or ';'. Without a line
+            // number, the serial parser takes the first 'N' in the line as one, and '*' / ';' start
+            // a checksum or comment. Two hex digits per character, at most 8 characters.
+            if (length >= 3 && (length - 1) % 2 == 0 && (length - 1) / 2 <= MATERIAL_NAME_SIZE && name[0] == 'X')
+            {
+                uint8_t hex_length = length - 1;
+                bool is_hex = true;
+                for (uint8_t i = 1; i <= hex_length && is_hex; i++)
+                    is_hex = isxdigit(name[i]);
+                if (is_hex)
+                {
+                    for (uint8_t i = 0; i < hex_length / 2; i++)
+                    {
+                        char pair[3] = { name[1 + 2 * i], name[2 + 2 * i], '\0' };
+                        decoded[i] = (char)strtol(pair, NULL, 16);
+                    }
+                    decoded[hex_length / 2] = '\0';
+                    name = decoded;
+                    length = hex_length / 2;
+                }
+            }
         }
         jedi_rename_preset(p, name, length);
     }

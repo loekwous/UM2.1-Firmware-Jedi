@@ -24,7 +24,7 @@ The material stays configured in the printer menu (EEPROM). Over USB:
 | `M12002 [T0] [S0.4] [V0\|1]` | applies the loaded material like an UltiGCode print from SD: nozzle (for nozzle size S) and bed target temperatures, fan %, flow %, retraction for `G10`/`G11`; `V1` = volumetric E values (UltiGCode). Does not wait: follow with `M190` and `M109` without `S`. |
 | `M12003` | back to the defaults for classic G-code (fan 100%, flow 100%, E in mm) |
 | `M12004 P<n> [S0.4] [H<temp>] [B<bed>] [F<fan %>] [W<flow %>] [D<diameter>] [L<retract mm>] [R<retract mm/s>] [C<change temp>]` | modifies preset `n` (1-based, as listed by `M12001`); `H`, `L`, `R` apply to nozzle size `S` (default 0.4). Answers with the updated `PRESET:` line. Does not touch the loaded material: follow with `M12007`. |
-| `M12005 P<n> <name>` | renames preset `n` (1-8 printable characters) |
+| `M12005 P<n> <name>` or `M12005 P<n> X<hex>` | renames preset `n` (1-8 printable characters). Use the hex form (two hex digits per character, e.g. `X4E696E6A61203835` = `Ninja 85`) for names with an uppercase `N`, `*` or `;`: without a line number the serial parser takes the first `N` as one, and `*` / `;` start a checksum or comment. |
 | `M12006 [P<n>]` | adds a preset as a copy of preset `n` (default 1), named `CUSTOM<k>` (max. 16 presets) |
 | `M12007 P<n> [T0]` | loads preset `n` as the current material (settings only, no filament move; stored like a menu selection) |
 | `M12008 P<n>` | deletes preset `n` (at least 2 presets remain) |
