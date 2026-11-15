@@ -2370,6 +2370,62 @@ static void process_command()
     case 12003: // M12003 - Jedi: back to defaults for classic G-code
         jedi_reset_classic_gcode();
         break;
+    case 12004: // M12004 P<n> [S<nozzle>] [H] [B] [F] [W] [D] [L] [R] [C] - Jedi: modify a material preset
+    {
+        long p = code_seen('P') ? code_value_long() : 0;
+        float nozzle_size = code_seen('S') ? code_value() : 0.4;
+        bool has_temp = code_seen('H'); float temp = has_temp ? code_value() : 0;
+        bool has_bed = code_seen('B'); float bed = has_bed ? code_value() : 0;
+        bool has_fan = code_seen('F'); float fan = has_fan ? code_value() : 0;
+        bool has_flow = code_seen('W'); float flow = has_flow ? code_value() : 0;
+        bool has_diameter = code_seen('D'); float diameter = has_diameter ? code_value() : 0;
+        bool has_length = code_seen('L'); float length = has_length ? code_value() : 0;
+        bool has_speed = code_seen('R'); float speed = has_speed ? code_value() : 0;
+        bool has_change = code_seen('C'); float change = has_change ? code_value() : 0;
+        jedi_modify_preset(p, nozzle_size, has_temp, temp, has_bed, bed, has_fan, fan, has_flow, flow,
+                           has_diameter, diameter, has_length, length, has_speed, speed, has_change, change);
+    }
+    break;
+    case 12005: // M12005 P<n> <name> - Jedi: rename a material preset
+    {
+        long p = 0;
+        const char* name = NULL;
+        uint8_t length = 0;
+        if (code_seen('P'))
+        {
+            p = code_value_long();
+            // The name follows the P number: skip the digits and spaces, stop at the checksum.
+            const char* c = strchr_pointer + 1;
+            while (*c >= '0' && *c <= '9') c++;
+            while (*c == ' ') c++;
+            name = c;
+            while (*c != '\0' && *c != '*' && length < 255) { c++; length++; }
+            while (length > 0 && name[length - 1] == ' ') length--;
+        }
+        jedi_rename_preset(p, name, length);
+    }
+    break;
+    case 12006: // M12006 [P<n>] - Jedi: add a preset as a copy of preset n (default 1)
+        jedi_duplicate_preset(code_seen('P') ? code_value_long() : 1);
+        break;
+    case 12007: // M12007 P<n> [T<e>] - Jedi: load preset n as the current material
+    {
+        long p = code_seen('P') ? code_value_long() : 0;
+        uint8_t e = active_extruder;
+        if (code_seen('T'))
+            e = code_value();
+        if (e >= EXTRUDERS)
+        {
+            SERIAL_ECHO_START;
+            SERIAL_ECHOLNPGM("M12007: unknown T");
+            break;
+        }
+        jedi_load_preset(p, e);
+    }
+    break;
+    case 12008: // M12008 P<n> - Jedi: delete a material preset
+        jedi_delete_preset(code_seen('P') ? code_value_long() : 0);
+        break;
     case 10000://M10000 - Clear the whole LCD
         lcd_lib_clear();
         break;

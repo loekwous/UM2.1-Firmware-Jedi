@@ -1648,6 +1648,15 @@ float nozzleIndexToNozzleSize(uint8_t nozzle_index)
  *                                Does not wait; use M190 and M109 without S afterwards to wait.
  *  M12003                        Reset to the defaults for classic G-code
  *                                (fan 100%, flow 100%, E in mm of filament).
+ *  M12004 P<n> [S<nozzle>] [H<temp>] [B<bed>] [F<fan %>] [W<flow %>] [D<diameter>]
+ *         [L<retract mm>] [R<retract mm/s>] [C<change temp>]
+ *                                Modify preset n (1-based, as listed by M12001). H, L and R are per
+ *                                nozzle size S (default 0.4). Does not touch the loaded material;
+ *                                use M12007 to load the changed preset.
+ *  M12005 P<n> <name>            Rename preset n (1-8 printable characters).
+ *  M12006 [P<n>]                 Add a new preset as a copy of preset n (default 1), named CUSTOM<k>.
+ *  M12007 P<n> [T<e>]            Load preset n as the current material (settings only, no filament move).
+ *  M12008 P<n>                   Delete preset n (at least 2 presets remain).
  * Output is one line each: "MATERIAL:" / "PRESET:" / "APPLIED:" followed by key=value pairs.
  */
 static void jedi_print_name(const char* name)
@@ -1696,42 +1705,197 @@ void jedi_report_current_material(uint8_t e)
     SERIAL_PROTOCOLLNPGM("");
 }
 
-void jedi_report_material_presets()
+static uint8_t jedi_preset_count()
 {
     uint8_t count = eeprom_read_byte(EEPROM_MATERIAL_COUNT_OFFSET());
     if (count > EEPROM_MATERIAL_SETTINGS_MAX_COUNT)
         count = 0;
-    for(uint8_t nr=0; nr<count; nr++)
-    {
-        char name[MATERIAL_NAME_SIZE + 1];
-        eeprom_read_block(name, EEPROM_MATERIAL_NAME_OFFSET(nr), MATERIAL_NAME_SIZE);
-        name[MATERIAL_NAME_SIZE] = '\0';
-        SERIAL_PROTOCOLPGM("PRESET: ");
-        SERIAL_PROTOCOL(int(nr + 1));
-        SERIAL_PROTOCOLPGM("/");
-        SERIAL_PROTOCOL(int(count));
-        jedi_print_name(name);
+    return count;
+}
+
+static void jedi_report_preset(uint8_t nr, uint8_t count)
+{
+    char name[MATERIAL_NAME_SIZE + 1];
+    eeprom_read_block(name, EEPROM_MATERIAL_NAME_OFFSET(nr), MATERIAL_NAME_SIZE);
+    name[MATERIAL_NAME_SIZE] = '\0';
+    SERIAL_PROTOCOLPGM("PRESET: ");
+    SERIAL_PROTOCOL(int(nr + 1));
+    SERIAL_PROTOCOLPGM("/");
+    SERIAL_PROTOCOL(int(count));
+    jedi_print_name(name);
 #if TEMP_SENSOR_BED != 0
-        SERIAL_PROTOCOLPGM(" bed=");
-        SERIAL_PROTOCOL(int(eeprom_read_word(EEPROM_MATERIAL_BED_TEMPERATURE_OFFSET(nr))));
+    SERIAL_PROTOCOLPGM(" bed=");
+    SERIAL_PROTOCOL(int(eeprom_read_word(EEPROM_MATERIAL_BED_TEMPERATURE_OFFSET(nr))));
 #endif
-        SERIAL_PROTOCOLPGM(" fan=");
-        SERIAL_PROTOCOL(int(eeprom_read_byte(EEPROM_MATERIAL_FAN_SPEED_OFFSET(nr))));
-        SERIAL_PROTOCOLPGM(" flow=");
-        SERIAL_PROTOCOL(int(eeprom_read_word(EEPROM_MATERIAL_FLOW_OFFSET(nr))));
-        SERIAL_PROTOCOLPGM(" diameter=");
-        SERIAL_PROTOCOL_F(eeprom_read_float(EEPROM_MATERIAL_DIAMETER_OFFSET(nr)), 2);
-        SERIAL_PROTOCOLPGM(" change_temp=");
-        SERIAL_PROTOCOL(int(eeprom_read_word(EEPROM_MATERIAL_CHANGE_TEMPERATURE(nr))));
-        for(uint8_t n=0; n<MATERIAL_NOZZLE_COUNT; n++)
-        {
-            jedi_print_nozzle(n,
-                eeprom_read_word(EEPROM_MATERIAL_EXTRA_TEMPERATURE_OFFSET(nr, n)),
-                float(eeprom_read_word(EEPROM_MATERIAL_EXTRA_RETRACTION_LENGTH_OFFSET(nr, n))) / EEPROM_RETRACTION_LENGTH_SCALE,
-                float(eeprom_read_byte(EEPROM_MATERIAL_EXTRA_RETRACTION_SPEED_OFFSET(nr, n))) / EEPROM_RETRACTION_SPEED_SCALE * 60);
-        }
-        SERIAL_PROTOCOLLNPGM("");
+    SERIAL_PROTOCOLPGM(" fan=");
+    SERIAL_PROTOCOL(int(eeprom_read_byte(EEPROM_MATERIAL_FAN_SPEED_OFFSET(nr))));
+    SERIAL_PROTOCOLPGM(" flow=");
+    SERIAL_PROTOCOL(int(eeprom_read_word(EEPROM_MATERIAL_FLOW_OFFSET(nr))));
+    SERIAL_PROTOCOLPGM(" diameter=");
+    SERIAL_PROTOCOL_F(eeprom_read_float(EEPROM_MATERIAL_DIAMETER_OFFSET(nr)), 2);
+    SERIAL_PROTOCOLPGM(" change_temp=");
+    SERIAL_PROTOCOL(int(eeprom_read_word(EEPROM_MATERIAL_CHANGE_TEMPERATURE(nr))));
+    for(uint8_t n=0; n<MATERIAL_NOZZLE_COUNT; n++)
+    {
+        jedi_print_nozzle(n,
+            eeprom_read_word(EEPROM_MATERIAL_EXTRA_TEMPERATURE_OFFSET(nr, n)),
+            float(eeprom_read_word(EEPROM_MATERIAL_EXTRA_RETRACTION_LENGTH_OFFSET(nr, n))) / EEPROM_RETRACTION_LENGTH_SCALE,
+            float(eeprom_read_byte(EEPROM_MATERIAL_EXTRA_RETRACTION_SPEED_OFFSET(nr, n))) / EEPROM_RETRACTION_SPEED_SCALE * 60);
     }
+    SERIAL_PROTOCOLLNPGM("");
+}
+
+void jedi_report_material_presets()
+{
+    uint8_t count = jedi_preset_count();
+    for(uint8_t nr=0; nr<count; nr++)
+        jedi_report_preset(nr, count);
+}
+
+/*
+ * Writing presets (M12004-M12008). Every value is checked against the same validators that
+ * lcd_material_verify_material_settings() runs at boot: a single invalid preset value makes the
+ * firmware reset ALL presets to factory defaults on the next start. Some limits are tighter
+ * than the boot check, to catch typos (flow, diameter).
+ * Errors are reported as "echo:M120xx: ..." lines, never as "Error:" (OctoPrint treats that as fatal).
+ */
+static void jedi_reject(const char* pgm_command, const char* pgm_reason)
+{
+    SERIAL_ECHO_START;
+    serialprintPGM(pgm_command);
+    SERIAL_ECHOPGM(": ");
+    serialprintPGM(pgm_reason);
+    SERIAL_ECHOLNPGM("");
+}
+
+// Returns the 0-based preset index for a 1-based P value, or 0xFF when out of range.
+static uint8_t jedi_preset_index(long p)
+{
+    uint8_t count = jedi_preset_count();
+    if (p < 1 || p > count)
+        return 0xFF;
+    return uint8_t(p - 1);
+}
+
+static void jedi_copy_preset(uint8_t src, uint8_t dst)
+{
+    char name[MATERIAL_NAME_SIZE];
+    eeprom_read_block(name, EEPROM_MATERIAL_NAME_OFFSET(src), MATERIAL_NAME_SIZE);
+    eeprom_write_block(name, EEPROM_MATERIAL_NAME_OFFSET(dst), MATERIAL_NAME_SIZE);
+    eeprom_write_word(EEPROM_MATERIAL_TEMPERATURE_OFFSET(dst), eeprom_read_word(EEPROM_MATERIAL_TEMPERATURE_OFFSET(src)));
+    eeprom_write_word(EEPROM_MATERIAL_BED_TEMPERATURE_OFFSET(dst), eeprom_read_word(EEPROM_MATERIAL_BED_TEMPERATURE_OFFSET(src)));
+    eeprom_write_byte(EEPROM_MATERIAL_FAN_SPEED_OFFSET(dst), eeprom_read_byte(EEPROM_MATERIAL_FAN_SPEED_OFFSET(src)));
+    eeprom_write_word(EEPROM_MATERIAL_FLOW_OFFSET(dst), eeprom_read_word(EEPROM_MATERIAL_FLOW_OFFSET(src)));
+    eeprom_write_float(EEPROM_MATERIAL_DIAMETER_OFFSET(dst), eeprom_read_float(EEPROM_MATERIAL_DIAMETER_OFFSET(src)));
+    for(uint8_t n=0; n<MAX_MATERIAL_NOZZLE_CONFIGURATIONS; n++)
+    {
+        eeprom_write_word(EEPROM_MATERIAL_EXTRA_TEMPERATURE_OFFSET(dst, n), eeprom_read_word(EEPROM_MATERIAL_EXTRA_TEMPERATURE_OFFSET(src, n)));
+        eeprom_write_word(EEPROM_MATERIAL_EXTRA_RETRACTION_LENGTH_OFFSET(dst, n), eeprom_read_word(EEPROM_MATERIAL_EXTRA_RETRACTION_LENGTH_OFFSET(src, n)));
+        eeprom_write_byte(EEPROM_MATERIAL_EXTRA_RETRACTION_SPEED_OFFSET(dst, n), eeprom_read_byte(EEPROM_MATERIAL_EXTRA_RETRACTION_SPEED_OFFSET(src, n)));
+    }
+    eeprom_write_word(EEPROM_MATERIAL_CHANGE_TEMPERATURE(dst), eeprom_read_word(EEPROM_MATERIAL_CHANGE_TEMPERATURE(src)));
+    eeprom_write_byte(EEPROM_MATERIAL_CHANGE_WAIT_TIME(dst), eeprom_read_byte(EEPROM_MATERIAL_CHANGE_WAIT_TIME(src)));
+}
+
+void jedi_modify_preset(long p, float nozzle_size,
+                        bool has_temp, float temp, bool has_bed, float bed, bool has_fan, float fan,
+                        bool has_flow, float flow, bool has_diameter, float diameter,
+                        bool has_retract_length, float retract_length_mm, bool has_retract_speed, float retract_speed_mm_s,
+                        bool has_change_temp, float change_temp)
+{
+    static const char cmd[] PROGMEM = "M12004";
+    uint8_t nr = jedi_preset_index(p);
+    if (nr == 0xFF) { jedi_reject(cmd, PSTR("no such preset P")); return; }
+    uint8_t n = nozzleSizeToTemperatureIndex(nozzle_size);
+
+    // Convert to the stored representation first, validate everything, then write: a rejected
+    // command changes nothing.
+    uint16_t temp_v = uint16_t(temp + 0.5);
+    uint16_t bed_v = uint16_t(bed + 0.5);
+    uint8_t fan_v = uint8_t(fan + 0.5);
+    uint16_t flow_v = uint16_t(flow + 0.5);
+    uint16_t length_v = uint16_t(retract_length_mm * EEPROM_RETRACTION_LENGTH_SCALE + 0.5);
+    uint16_t speed_v = uint16_t(retract_speed_mm_s * EEPROM_RETRACTION_SPEED_SCALE + 0.5);
+    uint16_t change_v = uint16_t(change_temp + 0.5);
+
+    if (has_temp && (temp < 150 || hasInvalidNozzleTemperature(temp_v) || temp_v > HEATER_0_MAXTEMP - 15)) { jedi_reject(cmd, PSTR("H out of range")); return; }
+    if (has_bed && (bed < 0 || hasInvalidBedTemperature(bed_v) || bed_v > BED_MAXTEMP - 15)) { jedi_reject(cmd, PSTR("B out of range")); return; }
+    if (has_fan && (fan < 0 || hasInvalidFanSpeed(fan_v))) { jedi_reject(cmd, PSTR("F out of range (0-100)")); return; }
+    if (has_flow && (flow < 50 || flow > 200 || hasInvalidMaterialFlow(flow_v))) { jedi_reject(cmd, PSTR("W out of range (50-200)")); return; }
+    if (has_diameter && (diameter < 1.0 || diameter > 3.5 || hasInvalidDiameter(diameter))) { jedi_reject(cmd, PSTR("D out of range (1.0-3.5)")); return; }
+    if (has_retract_length && (retract_length_mm < 0 || hasInvalidRetractionLength(length_v))) { jedi_reject(cmd, PSTR("L out of range (0-20)")); return; }
+    if (has_retract_speed && (retract_speed_mm_s < 1 || hasInvalidRetractionSpeed(speed_v) || speed_v > 255)) { jedi_reject(cmd, PSTR("R out of range (1-45)")); return; }
+    if (has_change_temp && (change_temp < 0 || hasInvalidNozzleTemperature(change_v) || change_v > HEATER_0_MAXTEMP - 15)) { jedi_reject(cmd, PSTR("C out of range")); return; }
+
+    if (has_temp)
+    {
+        eeprom_write_word(EEPROM_MATERIAL_EXTRA_TEMPERATURE_OFFSET(nr, n), temp_v);
+        if (n == 0) // The 0.4 mm value doubles as the preset's base temperature (MATERIAL.TXT "temperature").
+            eeprom_write_word(EEPROM_MATERIAL_TEMPERATURE_OFFSET(nr), temp_v);
+    }
+    if (has_bed) eeprom_write_word(EEPROM_MATERIAL_BED_TEMPERATURE_OFFSET(nr), bed_v);
+    if (has_fan) eeprom_write_byte(EEPROM_MATERIAL_FAN_SPEED_OFFSET(nr), fan_v);
+    if (has_flow) eeprom_write_word(EEPROM_MATERIAL_FLOW_OFFSET(nr), flow_v);
+    if (has_diameter) eeprom_write_float(EEPROM_MATERIAL_DIAMETER_OFFSET(nr), diameter);
+    if (has_retract_length) eeprom_write_word(EEPROM_MATERIAL_EXTRA_RETRACTION_LENGTH_OFFSET(nr, n), length_v);
+    if (has_retract_speed) eeprom_write_byte(EEPROM_MATERIAL_EXTRA_RETRACTION_SPEED_OFFSET(nr, n), uint8_t(speed_v));
+    if (has_change_temp) eeprom_write_word(EEPROM_MATERIAL_CHANGE_TEMPERATURE(nr), change_v);
+
+    jedi_report_preset(nr, jedi_preset_count());
+}
+
+void jedi_rename_preset(long p, const char* name, uint8_t length)
+{
+    static const char cmd[] PROGMEM = "M12005";
+    uint8_t nr = jedi_preset_index(p);
+    if (nr == 0xFF) { jedi_reject(cmd, PSTR("no such preset P")); return; }
+    if (length < 1 || length > MATERIAL_NAME_SIZE) { jedi_reject(cmd, PSTR("name must be 1-8 characters")); return; }
+    char buffer[MATERIAL_NAME_SIZE];
+    memset(buffer, 0, sizeof(buffer));
+    for(uint8_t i=0; i<length; i++)
+    {
+        if (name[i] < 32 || name[i] > 126) { jedi_reject(cmd, PSTR("name has invalid characters")); return; }
+        buffer[i] = name[i];
+    }
+    eeprom_write_block(buffer, EEPROM_MATERIAL_NAME_OFFSET(nr), MATERIAL_NAME_SIZE);
+    jedi_report_preset(nr, jedi_preset_count());
+}
+
+void jedi_duplicate_preset(long p)
+{
+    static const char cmd[] PROGMEM = "M12006";
+    uint8_t src = jedi_preset_index(p);
+    if (src == 0xFF) { jedi_reject(cmd, PSTR("no such preset P")); return; }
+    uint8_t count = jedi_preset_count();
+    if (count >= EEPROM_MATERIAL_SETTINGS_MAX_COUNT) { jedi_reject(cmd, PSTR("all 16 preset slots are in use")); return; }
+    jedi_copy_preset(src, count);
+    char buffer[MATERIAL_NAME_SIZE + 1] = "CUSTOM";
+    int_to_string(count + 1, buffer + 6);
+    eeprom_write_block(buffer, EEPROM_MATERIAL_NAME_OFFSET(count), MATERIAL_NAME_SIZE);
+    eeprom_write_byte(EEPROM_MATERIAL_COUNT_OFFSET(), count + 1);
+    jedi_report_preset(count, count + 1);
+}
+
+void jedi_load_preset(long p, uint8_t e)
+{
+    static const char cmd[] PROGMEM = "M12007";
+    uint8_t nr = jedi_preset_index(p);
+    if (nr == 0xFF) { jedi_reject(cmd, PSTR("no such preset P")); return; }
+    lcd_material_set_material(nr, e); // Also stores it as the loaded material in EEPROM.
+    jedi_report_current_material(e);
+}
+
+void jedi_delete_preset(long p)
+{
+    static const char cmd[] PROGMEM = "M12008";
+    uint8_t nr = jedi_preset_index(p);
+    if (nr == 0xFF) { jedi_reject(cmd, PSTR("no such preset P")); return; }
+    uint8_t count = jedi_preset_count();
+    if (count <= 2) { jedi_reject(cmd, PSTR("at least 2 presets must remain")); return; }
+    for(uint8_t i=nr; i+1<count; i++)
+        jedi_copy_preset(i + 1, i);
+    eeprom_write_byte(EEPROM_MATERIAL_COUNT_OFFSET(), count - 1);
+    jedi_report_material_presets();
 }
 
 void jedi_apply_current_material(uint8_t e, float nozzle_size, bool volumetric)

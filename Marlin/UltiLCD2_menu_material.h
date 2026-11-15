@@ -94,5 +94,14 @@ void jedi_report_current_material(uint8_t e);
 void jedi_report_material_presets();
 void jedi_apply_current_material(uint8_t e, float nozzle_size, bool volumetric);
 void jedi_reset_classic_gcode();
+void jedi_modify_preset(long p, float nozzle_size,
+                        bool has_temp, float temp, bool has_bed, float bed, bool has_fan, float fan,
+                        bool has_flow, float flow, bool has_diameter, float diameter,
+                        bool has_retract_length, float retract_length_mm, bool has_retract_speed, float retract_speed_mm_s,
+                        bool has_change_temp, float change_temp);
+void jedi_rename_preset(long p, const char* name, uint8_t length);
+void jedi_duplicate_preset(long p);
+void jedi_load_preset(long p, uint8_t e);
+void jedi_delete_preset(long p);
 
 #endif//ULTI_LCD2_MENU_MATERIAL_H
